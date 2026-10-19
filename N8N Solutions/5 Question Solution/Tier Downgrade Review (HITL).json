@@ -1,0 +1,1064 @@
+{
+  "name": "Tier Downgrade Review (HITL)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tier-downgrade-review",
+        "options": {}
+      },
+      "id": "232e5d39-37cb-48a6-91cf-aba1124712a9",
+      "name": "Webhook - Tier Downgrade Review",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2896,
+        192
+      ],
+      "webhookId": "tier-downgrade-review"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableName": "Members",
+        "keysUi": {
+          "keyValues": [
+            {
+              "key": "member_id",
+              "value": "={{$json.body.member_id}}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "84c94f6c-8cbe-4a16-bc9d-5fd2133f24d7",
+      "name": "DynamoDB - Get Member Profile",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -2656,
+        192
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Native AWS DynamoDB node. Returns tier, threshold, tenure_years, specialist_email, member_email, member_notification_topic_arn for the member. Key condition: member_id partition key from the webhook body."
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableName": "PointLedgerTransactions",
+        "keyConditionExpression": "member_id = :member_id",
+        "eavUi": {
+          "eavValues": [
+            {
+              "attribute": ":member_id",
+              "value": "={{$('DynamoDB - Get Member Profile').item.json.member_id}}"
+            }
+          ]
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "198477fb-dfc5-4be8-b766-22cc878c143e",
+      "name": "DynamoDB - Get Point Ledger Transactions",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -2416,
+        192
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Native AWS DynamoDB node, Get All Items. Queries every transaction (earn/redeem/adjustment/dispute) for this member from the PointLedgerTransactions table -- this is now the single source of truth for points, not the webhook payload."
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "ledger_items",
+        "options": {}
+      },
+      "id": "a758979e-2e48-41b6-998a-ed34ac73f905",
+      "name": "Aggregate - Combine Ledger Items",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        -2176,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const profile = $('DynamoDB - Get Member Profile').first().json;\n\nconst agg = $input.first().json;\n\nconst ledger = agg.ledger_items || [];\n\n \n\nconst now = Date.now();\n\nconst twelveMonthsAgo = now - 365 * 24 * 60 * 60 * 1000;\n\nconst trailing = ledger.filter(tx => new Date(tx.transaction_date).getTime() >= twelveMonthsAgo);\n\n \n\nconst qualifyingNonDisputed = trailing.filter(tx => tx.qualifying === true && tx.dispute_status !== 'open');\n\nconst disputedTx = trailing.filter(tx => tx.dispute_status === 'open');\n\n \n\nconst currentPoints = qualifyingNonDisputed.reduce((sum, tx) => sum + Number(tx.points || 0), 0);\n\nconst openDisputes = disputedTx.length;\n\nconst disputeAmount = disputedTx.reduce((sum, tx) => sum + Number(tx.points || 0), 0);\n\n \n\nreturn [{\n\n  json: {\n\n    member_id: profile.member_id,\n\n    tier: profile.tier,\n\n    threshold: Number(profile.threshold),\n\n    tenure_years: Number(profile.tenure_years || 0),\n\n    specialist_email: profile.specialist_email,\n\n    member_email: profile.member_email,\n\n    member_notification_topic_arn: profile.member_notification_topic_arn,\n\n    current_points: currentPoints,\n\n    open_disputes: openDisputes,\n\n    dispute_amount: disputeAmount,\n\n    ledger_transaction_count: trailing.length,\n\n    review_type: 'tier-downgrade'\n\n  }\n\n}];"
+      },
+      "id": "c3709beb-6a9f-44d8-818d-2634976b330a",
+      "name": "Compute Points From Ledger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1936,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{JSON.stringify($json)}}",
+        "options": {
+          "systemMessage": "You are a Tier Eligibility Agent for a loyalty program. Given member JSON with current_points, threshold, open_disputes, dispute_amount, tenure_years, and tier (all sourced from the Point Ledger and Members tables, not the caller), compute: percent_below_threshold, has_open_disputes, is_platinum, tenure_waiver_eligible, a confidence_score (0-100) that an automated downgrade is correct, is_borderline (true if percent_below_threshold<5 OR has_open_disputes OR is_platinum OR tenure_waiver_eligible), and meets_auto_resolve (true if percent_below_threshold>15 AND not has_open_disputes AND confidence_score>=80). Respond with ONLY a raw JSON object containing exactly these fields, no prose, no markdown code fences.\n\nExpected Output: A raw JSON judgement object in $json.output."
+        }
+      },
+      "id": "41947a9a-401b-419a-9073-c693cf047186",
+      "name": "AI Agent - Tier Eligibility Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.9,
+      "position": [
+        -1744,
+        192
+      ],
+      "notes": "Built-in LangChain Agent node -- ships with n8n, nothing to install. Requires a connected chat model (AWS Bedrock Chat Model below) via the model input on the canvas; memory is optional and connected the same way. Output lands in $json.output as plain text."
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{$('Compute Points From Ledger').item.json.member_id}}",
+        "contextWindowLength": 10
+      },
+      "id": "a1131c78-828f-40f8-99b6-ad673d386f1a",
+      "name": "Window Buffer Memory (per member)",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        -1664,
+        464
+      ],
+      "notes": "Optional but recommended: gives the agent short-term memory of this member's recent review history within a session key scoped to member_id. This is in-memory per n8n instance, not a durable cross-session store like AgentCore's managed memory -- for durable history, rely on the Point Ledger audit entries instead."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Agent response comes into this node\n\nconst items = $input.all();\n\n \n\n// Ledger is the source of truth for raw numbers\n\nconst ledgerData = $('Compute Points From Ledger').first().json;\n\n \n\nreturn items.map(item => {\n\n  const d = item.json;\n\n \n\n  const toBool = (v) => v === true || v === 'true';\n\n \n\n  const toNum = (v, fallback = null) =>\n\n    (v === undefined || v === null || isNaN(Number(v)))\n\n      ? fallback\n\n      : Number(v);\n\n \n\n  const text = d.output || d.response || d.completion || d.text || JSON.stringify(d);\n\n \n\n  let jsonSlice = null;\n\n \n\n  const finalJsonMatch = text.match(/FINAL_JSON:\\s*(\\{[\\s\\S]*\\})\\s*$/);\n\n  if (finalJsonMatch) {\n\n    jsonSlice = finalJsonMatch[1];\n\n  } else {\n\n    const start = text.indexOf('{');\n\n    const end = text.lastIndexOf('}');\n\n    if (start !== -1 && end !== -1 && end > start) {\n\n      jsonSlice = text.slice(start, end + 1);\n\n    }\n\n  }\n\n \n\n  if (!jsonSlice) {\n\n    throw new Error('Agent response does not contain a valid JSON object');\n\n  }\n\n \n\n  let agentJson;\n\n  try {\n\n    agentJson = JSON.parse(jsonSlice);\n\n  } catch (e) {\n\n    throw new Error('Agent response JSON could not be parsed: ' + e.message);\n\n  }\n\n \n\n  const agentPercentBelowThreshold = toNum(agentJson.percent_below_threshold, null);\n\n  const agentHasOpenDisputes = toBool(agentJson.has_open_disputes);\n\n  const agentIsPlatinum = toBool(agentJson.is_platinum);\n\n  const agentTenureWaiverEligible = toBool(agentJson.tenure_waiver_eligible);\n\n  const agentConfidenceScore = toNum(agentJson.confidence_score, null);\n\n  const agentIsBorderline = toBool(agentJson.is_borderline);\n\n  const agentMeetsAutoResolve = toBool(agentJson.meets_auto_resolve);\n\n \n\n  // Agent output is considered parseable only when\n\n  // the key judgement fields are present.\n\n  const agentParseOk =\n\n    agentJson.percent_below_threshold !== undefined &&\n\n    agentJson.confidence_score !== undefined;\n\n \n\n  const currentPoints = Number(ledgerData.current_points);\n\n  const threshold = Number(ledgerData.threshold);\n\n \n\n  const recomputedPercentBelow =\n\n    threshold > 0\n\n      ? Number((((threshold - currentPoints) / threshold) * 100).toFixed(2))\n\n      : 0;\n\n \n\n  const recomputedHasDisputes = Number(ledgerData.open_disputes || 0) > 0;\n\n  const recomputedIsPlatinum = String(ledgerData.tier || '').toLowerCase() === 'platinum';\n\n  const recomputedTenureWaiver = Number(ledgerData.tenure_years || 0) > 3;\n\n \n\n  let recomputedConfidenceScore;\n\n  if (recomputedHasDisputes) {\n\n    recomputedConfidenceScore = 0;\n\n  } else if (recomputedPercentBelow <= 15) {\n\n    recomputedConfidenceScore = 40;\n\n  } else if (recomputedPercentBelow <= 20) {\n\n    recomputedConfidenceScore = 70;\n\n  } else {\n\n    recomputedConfidenceScore = 95;\n\n  }\n\n \n\n  const agentTrustworthy =\n\n    agentParseOk &&\n\n    Math.abs((agentPercentBelowThreshold ?? -999) - recomputedPercentBelow) < 1;\n\n \n\n  const percentBelowThreshold = recomputedPercentBelow;\n\n  const hasOpenDisputes = recomputedHasDisputes;\n\n  const isPlatinum = recomputedIsPlatinum;\n\n  const tenureWaiverEligible = recomputedTenureWaiver;\n\n  const confidenceScore = recomputedConfidenceScore;\n\n \n\n  let waiverApplied = false;\n\n  let waiverReason = null;\n\n \n\n  if (tenureWaiverEligible) {\n\n    waiverApplied = true;\n\n    waiverReason = 'Tenure > 3 years - eligible for loyalty waiver consideration';\n\n  }\n\n \n\n  if (hasOpenDisputes) {\n\n    waiverApplied = true;\n\n    const disputeNote =\n\n      `${ledgerData.open_disputes} open dispute(s) worth ` +\n\n      `${ledgerData.dispute_amount} pts may restore qualifying balance`;\n\n    waiverReason = waiverReason ? `${waiverReason}; ${disputeNote}` : disputeNote;\n\n  }\n\n \n\n  const isBorderline = (\n\n    percentBelowThreshold < 5 ||\n\n    hasOpenDisputes === true ||\n\n    isPlatinum === true ||\n\n    tenureWaiverEligible === true\n\n  );\n\n \n\n  const meetsAutoResolve = (\n\n    percentBelowThreshold > 15 &&\n\n    hasOpenDisputes === false &&\n\n    confidenceScore >= 80\n\n  );\n\n \n\n  const slaDeadline = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();\n\n \n\n  return {\n\n    json: {\n\n      // Ledger remains the base/source-of-truth data\n\n      ...ledgerData,\n\n \n\n      // Deterministic, ledger-derived values (always used)\n\n      percent_below_threshold: percentBelowThreshold,\n\n      has_open_disputes: hasOpenDisputes,\n\n      is_platinum: isPlatinum,\n\n      tenure_waiver_eligible: tenureWaiverEligible,\n\n      confidence_score: confidenceScore,\n\n \n\n      // Agent status (diagnostics only)\n\n      agent_parse_ok: agentParseOk,\n\n      agent_trustworthy: agentTrustworthy,\n\n \n\n      // Agent's original judgement fields (diagnostics only)\n\n      agent_percent_below_threshold: agentPercentBelowThreshold,\n\n      agent_confidence_score: agentConfidenceScore,\n\n      agent_is_borderline: agentIsBorderline,\n\n      agent_meets_auto_resolve: agentMeetsAutoResolve,\n\n \n\n      // Final deterministic decisions\n\n      waiver_applied: waiverApplied,\n\n      waiver_reason: waiverReason,\n\n      is_borderline: isBorderline,\n\n      meets_auto_resolve: meetsAutoResolve,\n\n \n\n      // SLA\n\n      sla_deadline: slaDeadline,\n\n      review_started_at: new Date().toISOString()\n\n    }\n\n  };\n\n});"
+      },
+      "id": "28b0be6b-c5e8-4dc8-a1ae-7bfc0aa5d781",
+      "name": "Parse Agent Response + Waiver Scorer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1440,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-borderline",
+              "leftValue": "={{$json.is_borderline}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "cc32b780-b2b6-4444-8465-c191af647308",
+      "name": "IF: Borderline?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1232,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "topic": {
+          "__rl": true,
+          "value": "arn:aws:sns:ap-south-1:441243246681:loyalty-tier-review-alerts",
+          "mode": "list",
+          "cachedResultName": "loyalty-tier-review-alerts",
+          "cachedResultUrl": "https://ap-south-1.console.aws.amazon.com/sns/v3/home?region=ap-south-1#/topic/arn:aws:sns:ap-south-1:441243246681:loyalty-tier-review-alerts"
+        },
+        "subject": "=[Action needed, SLA 48h] Tier downgrade review - {{$json.member_id}}",
+        "message": "=Member {{$json.member_id}} ({{$json.tier}}) is flagged for downgrade review.\n\nPoints (from ledger): {{$json.current_points}} / {{$json.threshold}} ({{$json.percent_below_threshold}}% below threshold)\nOpen disputes: {{$json.open_disputes}} worth {{$json.dispute_amount}} pts\nTenure: {{$json.tenure_years}} years (waiver eligible: {{$json.tenure_waiver_eligible}})\nConfidence score: {{$json.confidence_score}}\nAgent output trusted: {{$json.agent_trustworthy}}\nWaiver note: {{$json.waiver_reason}}\n\nReview and reply via the case link (resume webhook):\n{{$execution.resumeUrl}}\n\nThis review must be completed within 48 hours or it will trigger an SLA breach alarm."
+      },
+      "id": "059a3a96-969f-499b-8e30-9fe711b9a05d",
+      "name": "SNS - Notify Specialist",
+      "type": "n8n-nodes-base.awsSns",
+      "typeVersion": 1,
+      "position": [
+        -800,
+        176
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "limitWaitTime": true,
+        "resumeAmount": 48,
+        "options": {}
+      },
+      "id": "ac13f18f-6cb2-4b3b-9d16-535950409fb6",
+      "name": "Wait - Specialist Review (SLA 48h)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -576,
+        176
+      ],
+      "webhookId": "d6c925cb-206a-4de9-bf99-3dc30e4ac681"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.decision }}",
+                    "rightValue": "honour",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "94d91758-ef7b-4262-8405-f13e9486b545"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.decision }}",
+                    "rightValue": "downgrade",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "572b9c2c-8929-4278-af19-d8b30688ee92"
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "e9cae35e-4a11-4c3b-ad4f-cf08dba4d51a",
+      "name": "Switch - Specialist Decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -304,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "tableName": "MemberTierStatus",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "member_id",
+              "fieldValue": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}"
+            },
+            {
+              "fieldId": "decision",
+              "fieldValue": "honoured"
+            },
+            {
+              "fieldId": "review_details",
+              "fieldValue": "specialist-review"
+            },
+            {
+              "fieldId": "specialist_notes",
+              "fieldValue": "={{ $json.body.specialist_notes || 'no notes provided' }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "e8be4e4b-4705-47e7-9c05-da3c55459296",
+      "name": "DynamoDB - Update Tier Status (Honour)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "autoParseNumbers disabled: with it on, an empty-string field value is sent as an empty Number attribute and DynamoDB rejects the PutItem with \"The parameter cannot be converted to a numeric value\". reason falls back to a non-empty string when the specialist leaves notes blank."
+    },
+    {
+      "parameters": {
+        "tableName": "PointLedgerTransactions",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "member_id",
+              "fieldValue": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}"
+            },
+            {
+              "fieldId": "transaction_id",
+              "fieldValue": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}-review-{{$now.toMillis()}}"
+            },
+            {
+              "fieldId": "transaction_date",
+              "fieldValue": "={{$now.toISO()}}"
+            },
+            {
+              "fieldId": "transaction_type",
+              "fieldValue": "review_decision"
+            },
+            {
+              "fieldId": "points",
+              "fieldValue": "0"
+            },
+            {
+              "fieldId": "qualifying",
+              "fieldValue": "false"
+            },
+            {
+              "fieldId": "dispute_status",
+              "fieldValue": "none"
+            },
+            {
+              "fieldId": "specialist_notes",
+              "fieldValue": "=Specialist honoured tier. Notes: {{ $json.specialist_notes || 'n/a' }}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "ca501979-c51d-469f-be16-363f0e96d87c",
+      "name": "DynamoDB - Log Ledger Entry (Honour)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        240,
+        0
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Appends an immutable audit record of the decision to the Point Ledger (append-only pattern, not an overwrite). Field IDs added explicitly and autoParseNumbers disabled so \"0\"/\"false\" are stored as strings rather than risking numeric-conversion failures."
+    },
+    {
+      "parameters": {
+        "topic": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_notification_topic_arn }}",
+        "subject": "Your membership tier has been confirmed",
+        "message": "=Good news - after review, your {{ $('Parse Agent Response + Waiver Scorer').item.json.tier }} status has been retained for this cycle. Thank you for being a valued member."
+      },
+      "id": "74b81d09-e668-4e2a-afbb-c3c753a1d70e",
+      "name": "SNS - Notify Member (Honoured)",
+      "type": "n8n-nodes-base.awsSns",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Topic ARN and tier read from the Waiver Scorer node because the preceding DynamoDB writes replace the item payload."
+    },
+    {
+      "parameters": {
+        "tableName": "MemberTierStatus",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "member_id",
+              "fieldValue": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}"
+            },
+            {
+              "fieldId": "decision",
+              "fieldValue": "downgraded"
+            },
+            {
+              "fieldId": "review_details",
+              "fieldValue": "specialist-review"
+            },
+            {
+              "fieldId": "specialist_notes",
+              "fieldValue": "={{ $json.body.specialist_notes || 'no notes provided' }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "b5585ec4-c8ca-45ca-b153-546db1165cca",
+      "name": "DynamoDB - Update Tier Status (Downgrade)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        0,
+        192
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "autoParseNumbers disabled: with it on, an empty-string field value is sent as an empty Number attribute and DynamoDB rejects the PutItem with \"The parameter cannot be converted to a numeric value\". reason falls back to a non-empty string when the specialist leaves notes blank."
+    },
+    {
+      "parameters": {
+        "tableName": "PointLedgerTransactions",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "member_id",
+              "fieldValue": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}"
+            },
+            {
+              "fieldId": "transaction_id",
+              "fieldValue": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}-review-{{$now.toMillis()}}"
+            },
+            {
+              "fieldId": "transaction_date",
+              "fieldValue": "={{$now.toISO()}}"
+            },
+            {
+              "fieldId": "transaction_type",
+              "fieldValue": "review_decision"
+            },
+            {
+              "fieldId": "points",
+              "fieldValue": "0"
+            },
+            {
+              "fieldId": "qualifying",
+              "fieldValue": "false"
+            },
+            {
+              "fieldId": "dispute_status",
+              "fieldValue": "none"
+            },
+            {
+              "fieldId": "specialist_notes",
+              "fieldValue": "=Specialist confirmed downgrade. Notes: {{ $json.specialist_notes || 'n/a' }}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "171ac80b-4868-48b6-96c5-53788abfc4f9",
+      "name": "DynamoDB - Log Ledger Entry (Downgrade)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        240,
+        192
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Appends an immutable audit record of the decision to the Point Ledger (append-only pattern, not an overwrite). Field IDs added explicitly and autoParseNumbers disabled so \"0\"/\"false\" are stored as strings rather than risking numeric-conversion failures."
+    },
+    {
+      "parameters": {
+        "topic": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_notification_topic_arn }}",
+        "subject": "An update on your membership tier",
+        "message": "=After a full review, including any applicable waivers, your membership tier has moved from {{ $('Parse Agent Response + Waiver Scorer').item.json.tier }}. Contact our retention team if you have questions."
+      },
+      "id": "736117ef-a404-4b11-86bc-558e7ba2f041",
+      "name": "SNS - Notify Member (Downgraded)",
+      "type": "n8n-nodes-base.awsSns",
+      "typeVersion": 1,
+      "position": [
+        480,
+        192
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Topic ARN and tier read from the Waiver Scorer node because the preceding DynamoDB writes replace the item payload."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://monitoring.ap-south-1.amazonaws.com",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "aws",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "PutMetricData"
+            },
+            {
+              "name": "Version",
+              "value": "2010-08-01"
+            },
+            {
+              "name": "Namespace",
+              "value": "LoyaltyOps/TierDowngradeReview"
+            },
+            {
+              "name": "MetricData.member1.MetricName",
+              "value": "SLABreach"
+            },
+            {
+              "name": "MetricData.member1.Value",
+              "value": "1"
+            },
+            {
+              "name": "MetricData.member1.Unit",
+              "value": "Count"
+            },
+            {
+              "name": "MetricData.member1.Dimensions.member1.Name",
+              "value": "member_id"
+            },
+            {
+              "name": "MetricData.member1.Dimensions.member1.Value",
+              "value": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ced59452-66b1-4d1c-8210-3a4b9ab6ba56",
+      "name": "CloudWatch - SLA Breach Alarm",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        384
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "No native CloudWatch node exists in n8n as of this version, so this stays an HTTP Request node with AWS SigV4 auth (Predefined Credential Type: AWS). URL is the CloudWatch Query API endpoint for ap-south-1 (monitoring.<region>.amazonaws.com), NOT the console UI URL -- the console URL returns an HTML \"Page not found\" page. Query API params go in the form-urlencoded POST body, which is what SigV4 expects for signed POSTs."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-auto",
+              "leftValue": "={{$json.meets_auto_resolve}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ae9abcd9-035f-4d12-b90e-aaf35a965ea3",
+      "name": "IF: Auto-Resolve Eligible?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1056,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "tableName": "MemberTierStatus",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "member_id",
+              "fieldValue": "={{$json.member_id}}"
+            },
+            {
+              "fieldId": "decision",
+              "fieldValue": "downgraded"
+            },
+            {
+              "fieldId": "review_details",
+              "fieldValue": "auto-resolved"
+            },
+            {
+              "fieldId": "confidence_score",
+              "fieldValue": "={{$json.confidence_score}}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "ee6b8087-c0af-4ea6-ab28-5a42eff3252b",
+      "name": "DynamoDB - Update Tier Status (Auto-Downgrade)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -832,
+        384
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Native AWS DynamoDB node, Upsert operation. autoParseNumbers disabled for consistent string storage across all tier-status writes."
+    },
+    {
+      "parameters": {
+        "tableName": "PointLedgerTransactions",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "member_id",
+              "fieldValue": "={{$json.member_id}}"
+            },
+            {
+              "fieldId": "transaction_id",
+              "fieldValue": "={{$json.member_id}}-review-{{$now.toMillis()}}"
+            },
+            {
+              "fieldId": "transaction_date",
+              "fieldValue": "={{$now.toISO()}}"
+            },
+            {
+              "fieldId": "transaction_type",
+              "fieldValue": "review_decision"
+            },
+            {
+              "fieldId": "points",
+              "fieldValue": "0"
+            },
+            {
+              "fieldId": "qualifying",
+              "fieldValue": "false"
+            },
+            {
+              "fieldId": "dispute_status",
+              "fieldValue": "none"
+            },
+            {
+              "fieldId": "notes",
+              "fieldValue": "=Auto-resolved downgrade. Confidence {{$json.confidence_score}}, {{$json.percent_below_threshold}}% below threshold, no open disputes."
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "90568661-3e5c-40ef-a3c9-5c3b39216527",
+      "name": "DynamoDB - Log Ledger Entry (Auto-Downgrade)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -608,
+        416
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Appends an immutable audit record of the decision to the same Point Ledger table (append-only pattern, not an overwrite). autoParseNumbers disabled for consistency."
+    },
+    {
+      "parameters": {
+        "topic": {
+          "__rl": true,
+          "value": "={{ $('Parse Agent Response + Waiver Scorer').item.json.member_notification_topic_arn }}",
+          "mode": "id"
+        },
+        "subject": "An update on your membership tier",
+        "message": "=Hi, after reviewing your account, your membership tier has moved from {{ $('Parse Agent Response + Waiver Scorer').item.json.tier }} based on your points balance ({{ $('Parse Agent Response + Waiver Scorer').item.json.current_points }} / {{ $('Parse Agent Response + Waiver Scorer').item.json.threshold }}). If you believe this is incorrect, please contact our retention team."
+      },
+      "id": "b765bc6d-def5-443c-b188-3322fcfc7f5b",
+      "name": "SNS - Notify Member (Auto-Downgraded)",
+      "type": "n8n-nodes-base.awsSns",
+      "typeVersion": 1,
+      "position": [
+        -384,
+        448
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Member fields read from the Waiver Scorer node because the preceding DynamoDB writes replace the item payload."
+    },
+    {
+      "parameters": {
+        "model": "apac.anthropic.claude-3-haiku-20240307-v1:0",
+        "options": {
+          "maxTokensToSample": 1000,
+          "temperature": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1.2,
+      "position": [
+        -1888,
+        400
+      ],
+      "id": "e4531325-6f2e-408a-a1ed-8c6a5f960043",
+      "name": "AWS Bedrock Chat Model1",
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Tier Downgrade Review": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Get Member Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Get Member Profile": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Get Point Ledger Transactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Get Point Ledger Transactions": {
+      "main": [
+        [
+          {
+            "node": "Aggregate - Combine Ledger Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate - Combine Ledger Items": {
+      "main": [
+        [
+          {
+            "node": "Compute Points From Ledger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Points From Ledger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent - Tier Eligibility Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent - Tier Eligibility Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Agent Response + Waiver Scorer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Window Buffer Memory (per member)": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent - Tier Eligibility Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Agent Response + Waiver Scorer": {
+      "main": [
+        [
+          {
+            "node": "IF: Borderline?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Borderline?": {
+      "main": [
+        [
+          {
+            "node": "SNS - Notify Specialist",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Auto-Resolve Eligible?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SNS - Notify Specialist": {
+      "main": [
+        [
+          {
+            "node": "Wait - Specialist Review (SLA 48h)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait - Specialist Review (SLA 48h)": {
+      "main": [
+        [
+          {
+            "node": "Switch - Specialist Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch - Specialist Decision": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Update Tier Status (Honour)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DynamoDB - Update Tier Status (Downgrade)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CloudWatch - SLA Breach Alarm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Update Tier Status (Honour)": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Log Ledger Entry (Honour)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Log Ledger Entry (Honour)": {
+      "main": [
+        [
+          {
+            "node": "SNS - Notify Member (Honoured)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Update Tier Status (Downgrade)": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Log Ledger Entry (Downgrade)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Log Ledger Entry (Downgrade)": {
+      "main": [
+        [
+          {
+            "node": "SNS - Notify Member (Downgraded)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Auto-Resolve Eligible?": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Update Tier Status (Auto-Downgrade)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SNS - Notify Specialist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Update Tier Status (Auto-Downgrade)": {
+      "main": [
+        [
+          {
+            "node": "DynamoDB - Log Ledger Entry (Auto-Downgrade)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DynamoDB - Log Ledger Entry (Auto-Downgrade)": {
+      "main": [
+        [
+          {
+            "node": "SNS - Notify Member (Auto-Downgraded)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AWS Bedrock Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent - Tier Eligibility Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "845f660f-569f-4aed-86c5-79181711f66d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "119b6b4011f3f1ef1158a2238d0c3bda203b1e347cb06b9fb8a13ba0f0dcc36f"
+  },
+  "nodeGroups": [],
+  "id": "ZAmoTGnG5c8KT4oN",
+  "tags": []
+}

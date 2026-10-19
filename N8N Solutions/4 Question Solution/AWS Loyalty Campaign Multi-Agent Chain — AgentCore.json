@@ -1,0 +1,841 @@
+{
+  "name": "AWS Loyalty Campaign Multi-Agent Chain — AgentCore",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loyalty-campaign",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "fdd6341e-233f-4245-92cf-b0f2e83de4ed",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -2768,
+        -320
+      ],
+      "webhookId": "b07c5e40-0a52-4e79-b5ca-58b31c4615d5"
+    },
+    {
+      "parameters": {
+        "harnessArn": "arn:aws:bedrock-agentcore:ap-south-1:441243246681:harness/PlanningAgent-TKjiPvmRbt",
+        "modelId": "apac.anthropic.claude-3-haiku-20240307-v1:0",
+        "modelOptions": {
+          "modelMaxTokens": 4096,
+          "temperature": 0.2
+        },
+        "systemPrompt": "You are the Loyalty Campaign Planning Agent.\nThe workflow gives you a raw campaign brief. It may be plain text with \"Key: Value\" lines (e.g. \"Campaign Name: ...\", \"Target Tier: ...\") or JSON. Parse the brief yourself, extract the campaign details, and create a precise campaign plan.\nRespond ONLY with valid JSON. No markdown. No explanation. No text outside the JSON object.\nRequired fields:\ncampaign_name, campaign_type, target_tier, audience_segment, channel, send_date, send_time, tone, key_message, subject_hint, exclusions, created_at.",
+        "prompt": "=Parse the following campaign brief and produce a campaign plan.\n\nBRIEF:\n{{ $json.body }}\n\nReturn ONLY valid JSON with:\n{\n  \"campaign_name\":\"string from the brief\",\n  \"campaign_type\":\"string from the brief\",\n  \"target_tier\":\"string from the brief (e.g. Gold)\",\n  \"audience_segment\":\"describe target audience in detail\",\n  \"channel\":\"email or SMS\",\n  \"send_date\":\"YYYY-MM-DD\",\n  \"send_time\":\"HH:MM\",\n  \"tone\":\"celebratory or friendly or urgent\",\n  \"key_message\":\"core message to communicate\",\n  \"subject_hint\":\"one-line hint for content agent\",\n  \"exclusions\":[\"opted-out members\",\"recently churned\"],\n  \"created_at\":\"ISO timestamp\"\n}",
+        "sessionId": "={{ 'camp-' + $execution.id + '-loyalty_campaign_planning_agent' }}",
+        "additionalOptions": {
+          "actorId": "={{ 'camp-' + $execution.id }}",
+          "maxIterations": 20,
+          "maxTokens": 4096,
+          "timeoutSeconds": 300
+        }
+      },
+      "id": "42c5ef3b-8f12-46a1-9f48-377072860af3",
+      "name": "Planning Agent",
+      "type": "@aws/n8n-nodes-agentcore.agentCoreHarness",
+      "typeVersion": 2,
+      "position": [
+        -2544,
+        -320
+      ],
+      "credentials": {
+        "agentCoreApi": {
+          "id": "QU9sJdTfXa7V2tMI",
+          "name": "Amazon Bedrock AgentCore account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const upstream = $input.first().json;\n\nconst output = upstream.response ?? upstream.output ?? '{}';\n\nconst plan = JSON.parse(\n  String(output)\n    .replace(/```json/gi, '')\n    .replace(/```/g, '')\n    .trim()\n);\n\nconst base = {\n  campaign_id: 'camp-' + $execution.id,\n  campaign_name: plan.campaign_name ,\n  campaign_type: plan.campaign_type || '',\n  target_tier: plan.target_tier || 'Gold',\n  channel: plan.channel || 'email',\n  send_date: plan.send_date || '',\n  qa_attempt: 0,\n  max_qa_attempts: 3\n};\n\nconst planJson = JSON.stringify(plan, null, 2);\n\nconst result = {\n  ...base,\n  plan,\n  plan_ready: true,\n  plan_json: planJson,\n  s3_key_plan: `plan/plan-${base.campaign_id}.json`\n};\n\nconst binaryData = Buffer.from(planJson, 'utf8');\n\nreturn [{\n  json: result,\n  binary: {\n    data: {\n      data: binaryData.toString('base64'),\n      mimeType: 'application/json',\n      fileName: `plan-${base.campaign_id}.json`,\n      fileExtension: 'json'\n    }\n  }\n}];\n"
+      },
+      "id": "5afb665a-4b77-454e-acc3-f51148d7d54d",
+      "name": "Build + Prepare plan.json",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2320,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "loyalty-campaign-artifacts-test",
+        "fileName": "={{ $json.s3_key_plan }}",
+        "additionalFields": {}
+      },
+      "id": "2ee4660b-b465-41ce-875e-10a8a200b915",
+      "name": "Upload plan.json to S3",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 1,
+      "position": [
+        -2112,
+        -320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableName": "campaign_state",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "campaign_id",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.campaign_id }}"
+            },
+            {
+              "fieldId": "campaign_name",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.campaign_name }}"
+            },
+            {
+              "fieldId": "timestamp",
+              "fieldValue": "{{ $now.toISO() }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "=PLAN_READY"
+            },
+            {
+              "fieldId": "plan_ready",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.plan_ready }}"
+            },
+            {
+              "fieldId": "s3_key_plan",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.s3_key_plan }}"
+            },
+            {
+              "fieldId": "content_ready ",
+              "fieldValue": "="
+            },
+            {
+              "fieldId": "s3_key_content",
+              "fieldValue": "="
+            },
+            {
+              "fieldId": "qa_passed"
+            },
+            {
+              "fieldId": "qa_score"
+            },
+            {
+              "fieldId": "s3_key_qa"
+            },
+            {
+              "fieldId": "qa_attempt",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.qa_attempt }}"
+            },
+            {
+              "fieldId": "max_qa_attempts",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.max_qa_attempts }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "a704828f-930a-4032-af8b-7baf757ab184",
+      "name": "Update State — Plan Ready (DynamoDB)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -1904,
+        -320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "harnessArn": "arn:aws:bedrock-agentcore:ap-south-1:441243246681:harness/ContentAgent-qlw2Exjqlh",
+        "modelId": "apac.anthropic.claude-3-haiku-20240307-v1:0",
+        "modelOptions": {
+          "modelMaxTokens": 4096,
+          "temperature": 0.2
+        },
+        "systemPrompt": "You are the Loyalty Campaign Content Agent.\nDraft customer-facing campaign content from the campaign plan.\nIf QA issues or fix suggestions are supplied, fix ALL of them.\nRespond ONLY with valid JSON. No markdown. No explanation. No text outside the JSON object.\nRequired fields:\nsubject, preview_text, body, cta_text, cta_url, tone, word_count, attempt.",
+        "prompt": "=Draft campaign content using this plan:\nAudience    : {{ $('Build + Prepare plan.json').first().json.plan.audience_segment }}\nTone        : {{ $('Build + Prepare plan.json').first().json.plan.tone }}\nChannel     : {{ $('Build + Prepare plan.json').first().json.plan.channel }}\nKey Message : {{ $('Build + Prepare plan.json').first().json.plan.key_message }}\nSubject Hint: {{ $('Build + Prepare plan.json').first().json.plan.subject_hint }}\n\nQA Issues:\n{{ $json.qa_report && $json.qa_report.issues ? $json.qa_report.issues.join(', ') : 'None' }}\n\nFix Suggestions:\n{{ $json.qa_report && $json.qa_report.fix_suggestions ? $json.qa_report.fix_suggestions.join(', ') : 'None' }}\n\nAttempt number: {{ $json.qa_attempt ? $json.qa_attempt + 1 : 1 }}\n\nRespond ONLY with:\n{\n  \"subject\":\"email subject line under 50 characters\",\n  \"preview_text\":\"preview text shown under subject\",\n  \"body\":\"full email body between 50 and 300 words\",\n  \"cta_text\":\"call to action button text\",\n  \"cta_url\":\"https://loyalty.example.com/anniversary\",\n  \"tone\":\"tone used\",\n  \"word_count\":0,\n  \"attempt\":1\n}",
+        "sessionId": "={{ $('Build + Prepare plan.json').first().json.campaign_id + '-loyalty_campaign_content_agent' }}",
+        "additionalOptions": {
+          "actorId": "={{ $('Build + Prepare plan.json').first().json.campaign_id }}",
+          "maxIterations": 20,
+          "maxTokens": 4096,
+          "timeoutSeconds": 300
+        }
+      },
+      "id": "64c26fd3-38b1-4b52-aac5-a982cd8fc11c",
+      "name": "Content Agent",
+      "type": "@aws/n8n-nodes-agentcore.agentCoreHarness",
+      "typeVersion": 2,
+      "position": [
+        -1696,
+        -320
+      ],
+      "credentials": {
+        "agentCoreApi": {
+          "id": "QU9sJdTfXa7V2tMI",
+          "name": "Amazon Bedrock AgentCore account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Build + Prepare plan.json').first().json;\n\n// Get AI response\nconst input = $input.first().json;\nconst output = input.response || input.output;\n\nif (!output) {\n  throw new Error('AI response is missing. Expected `response` or `output`.');\n}\n\nlet content;\n\ntry {\n  if (typeof output === 'object' && output !== null) {\n    content = output;\n  } else {\n    const cleanedOutput = String(output)\n      .replace(/```json/gi, '')\n      .replace(/```/g, '')\n      .trim();\n\n    content = JSON.parse(cleanedOutput);\n  }\n} catch (e) {\n  throw new Error(\n    `AI response is not valid JSON: ${e.message}`\n  );\n}\n\nif (\n  !content ||\n  typeof content !== 'object' ||\n  Array.isArray(content)\n) {\n  throw new Error('AI response must be a JSON object.');\n}\n\nlet prevAttempt = 0;\n\ntry {\n  prevAttempt = Number(\n    $('Build + Prepare qa-report.json').first().json.qa_attempt || 0\n  );\n} catch (e) {\n  prevAttempt = 0;\n}\n\nconst attempt = prevAttempt + 1;\n\ncontent = {\n  subject: content.subject || '',\n  preview_text: content.preview_text || '',\n  body: content.body || '',\n  cta_text: content.cta_text || '',\n  cta_url: content.cta_url || '',\n  tone: content.tone || '',\n  word_count: Number(content.word_count || 0),\n  attempt: attempt\n};\n\nconst contentJson = JSON.stringify(content, null, 2);\n\nconst result = {\n  ...base,\n  content,\n  content_ready: true,\n  content_json: contentJson,\n  s3_key_content: `content/content-${base.campaign_id}-v${attempt}.json`,\n  qa_attempt: attempt\n};\n\nconst binaryData = Buffer.from(contentJson, 'utf8');\n\nreturn [\n  {\n    json: result,\n    binary: {\n      data: {\n        data: binaryData.toString('base64'),\n        mimeType: 'application/json',\n        fileName: `content-${base.campaign_id}-v${attempt}.json`,\n        fileExtension: 'json'\n      }\n    }\n  }\n];"
+      },
+      "id": "30b89772-5abd-4458-9d03-73c590994a48",
+      "name": "Build + Prepare content.json",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1520,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "loyalty-campaign-artifacts-test",
+        "fileName": "={{ $json.s3_key_content }}",
+        "additionalFields": {}
+      },
+      "id": "95bc6a18-c055-4d19-94eb-fc2e3a6aee07",
+      "name": "Upload content.json to S3",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 1,
+      "position": [
+        -1344,
+        -320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableName": "campaign_state",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "campaign_id",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.campaign_id }}"
+            },
+            {
+              "fieldId": "campaign_name",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.campaign_name }}"
+            },
+            {
+              "fieldId": "timestamp",
+              "fieldValue": "{{ $now.toISO() }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "=CONTENT_READY"
+            },
+            {
+              "fieldId": "plan_ready",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.plan_ready }}"
+            },
+            {
+              "fieldId": "s3_key_plan",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.s3_key_plan }}"
+            },
+            {
+              "fieldId": "content_ready",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.content_ready }}"
+            },
+            {
+              "fieldId": "s3_key_content",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.s3_key_content }}"
+            },
+            {
+              "fieldId": "qa_passed",
+              "fieldValue": "="
+            },
+            {
+              "fieldId": "qa_score"
+            },
+            {
+              "fieldId": "s3_key_qa"
+            },
+            {
+              "fieldId": "qa_attempt",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.qa_attempt }}"
+            },
+            {
+              "fieldId": "max_qa_attempts",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.max_qa_attempts }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $now.toISO() }} "
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "d806854b-7cb0-4ed9-93aa-2ba0b4043e05",
+      "name": "Update State — Content Ready (DynamoDB)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -1136,
+        -320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "harnessArn": "arn:aws:bedrock-agentcore:ap-south-1:441243246681:harness/QAAgent-uUUkkg5Swo",
+        "modelId": "apac.anthropic.claude-3-haiku-20240307-v1:0",
+        "modelOptions": {
+          "modelMaxTokens": 4096,
+          "temperature": 0.2
+        },
+        "systemPrompt": "You are the Loyalty Campaign QA Agent.\nCheck campaign content strictly against all six QA rules.\nRespond ONLY with valid JSON. No markdown. No explanation. No text outside the JSON object.",
+        "prompt": "=Check this campaign content against QA rules.\n\nRULES:\n1. Subject line must be under 50 characters\n2. Body must be between 50 and 300 words\n3. Must include a clear CTA\n4. Must NOT contain words: FREE, GUARANTEED, WINNER, CLICK NOW\n5. Tone must match the plan tone\n6. Must not make false promises about points over 1000\n\nSubject: {{ $('Build + Prepare content.json').first().json.content.subject }}\nPreview: {{ $('Build + Prepare content.json').first().json.content.preview_text }}\nBody: {{ $('Build + Prepare content.json').first().json.content.body }}\nCTA: {{ $('Build + Prepare content.json').first().json.content.cta_text }}\nTone: {{ $('Build + Prepare content.json').first().json.content.tone }}\nExpected Tone: {{ $('Build + Prepare plan.json').first().json.plan.tone }}\nAttempt: {{ $('Build + Prepare content.json').first().json.qa_attempt }}\n\nRespond ONLY with:\n{\n  \"passed\":true,\n  \"score\":0,\n  \"attempt\":1,\n  \"rules_checked\":6,\n  \"rules_passed\":0,\n  \"issues\":[],\n  \"fix_suggestions\":[],\n  \"checked_at\":\"ISO timestamp\"\n}",
+        "sessionId": "={{ $('Build + Prepare plan.json').first().json.campaign_id + '-loyalty_campaign_qa_agent' }}",
+        "additionalOptions": {
+          "actorId": "={{ $('Build + Prepare plan.json').first().json.campaign_id }}",
+          "maxIterations": 20,
+          "maxTokens": 4096,
+          "timeoutSeconds": 300
+        }
+      },
+      "id": "a8b152f5-8f31-463a-bcee-8df196af305a",
+      "name": "QA Agent",
+      "type": "@aws/n8n-nodes-agentcore.agentCoreHarness",
+      "typeVersion": 2,
+      "position": [
+        -944,
+        -320
+      ],
+      "credentials": {
+        "agentCoreApi": {
+          "id": "QU9sJdTfXa7V2tMI",
+          "name": "Amazon Bedrock AgentCore account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const base = $('Build + Prepare content.json').first().json;\n\nconst input = $input.first().json;\nconst output = input.response || input.output;\n\nif (!output) {\n  throw new Error(\n    'QA AI response is missing. Expected `response` or `output`.'\n  );\n}\n\nlet qaReport;\n\ntry {\n  if (typeof output === 'object' && output !== null) {\n    qaReport = output;\n  } else {\n    const cleanedOutput = String(output)\n      .replace(/```json/gi, '')\n      .replace(/```/g, '')\n      .trim();\n\n    qaReport = JSON.parse(cleanedOutput);\n  }\n} catch (e) {\n  throw new Error(\n    `QA AI response is not valid JSON: ${e.message}`\n  );\n}\n\nif (\n  !qaReport ||\n  typeof qaReport !== 'object' ||\n  Array.isArray(qaReport)\n) {\n  throw new Error(\n    'QA AI response must be a JSON object.'\n  );\n}\n\nconst passed =\n  qaReport.passed !== undefined\n    ? qaReport.passed === true\n    : qaReport.qa_passed === true;\n\nconst score = Number(\n  qaReport.score !== undefined\n    ? qaReport.score\n    : (\n        qaReport.qa_score !== undefined\n          ? qaReport.qa_score\n          : 0\n      )\n);\n\nlet attempt;\n\nif (base.qa_attempt !== undefined && base.qa_attempt !== null) {\n  attempt = Number(base.qa_attempt);\n} else if (\n  qaReport.attempt !== undefined &&\n  qaReport.attempt !== null\n) {\n  attempt = Number(qaReport.attempt);\n} else {\n  attempt = 1;\n}\n\nqaReport = {\n  passed,\n  score,\n  attempt,\n  rules_checked: Number(\n    qaReport.rules_checked || 0\n  ),\n  rules_passed: Number(\n    qaReport.rules_passed !== undefined\n      ? qaReport.rules_passed\n      : 0\n  ),\n  issues: Array.isArray(qaReport.issues)\n    ? qaReport.issues\n    : [],\n  fix_suggestions: Array.isArray(\n    qaReport.fix_suggestions\n  )\n    ? qaReport.fix_suggestions\n    : [],\n  checked_at:\n    qaReport.checked_at ||\n    new Date().toISOString()\n};\n\nconst qaReportJson = JSON.stringify(\n  qaReport,\n  null,\n  2\n);\n\nconst result = {\n  ...base,\n  qa_report: qaReport,\n  qa_passed: qaReport.passed === true,\n  qa_score: Number(qaReport.score),\n  qa_report_json: qaReportJson,\n  s3_key_qa:\n    `qa-report/qa-${base.campaign_id}-attempt${qaReport.attempt}.json`\n};\n\nconst binaryData = Buffer.from(\n  qaReportJson,\n  'utf8'\n);\n\nreturn [\n  {\n    json: result,\n    binary: {\n      data: {\n        data: binaryData.toString('base64'),\n        mimeType: 'application/json',\n        fileName:\n          `qa-${base.campaign_id}-attempt${qaReport.attempt}.json`,\n        fileExtension: 'json'\n      }\n    }\n  }\n];"
+      },
+      "id": "c9ad5a42-4778-4b4e-884e-6e64d50ed01e",
+      "name": "Build + Prepare qa-report.json",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "bucketName": "loyalty-campaign-artifacts-test",
+        "fileName": "={{ $json.s3_key_qa }}",
+        "additionalFields": {}
+      },
+      "id": "1cd12a66-ee61-4009-8258-d77f17342115",
+      "name": "Upload qa-report.json to S3",
+      "type": "n8n-nodes-base.awsS3",
+      "typeVersion": 1,
+      "position": [
+        -576,
+        -320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableName": "campaign_state",
+        "autoParseNumbers": false,
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "campaign_id",
+              "fieldValue": "={{ $('Build + Prepare qa-report.json').first().json.campaign_id }}"
+            },
+            {
+              "fieldId": "campaign_name",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.campaign_name }}"
+            },
+            {
+              "fieldId": "timestamp",
+              "fieldValue": "{{ $now.toISO() }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "=QA_CHECKED"
+            },
+            {
+              "fieldId": "plan_ready",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.plan_ready }}"
+            },
+            {
+              "fieldId": "s3_key_plan",
+              "fieldValue": "={{ $('Build + Prepare plan.json').first().json.s3_key_plan }}"
+            },
+            {
+              "fieldId": "content_ready",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.content_ready }}"
+            },
+            {
+              "fieldId": "s3_key_content",
+              "fieldValue": "={{ $('Build + Prepare content.json').first().json.s3_key_content }}"
+            },
+            {
+              "fieldId": "qa_passed",
+              "fieldValue": "={{ $('Build + Prepare qa-report.json').first().json.qa_passed }}"
+            },
+            {
+              "fieldId": "qa_score",
+              "fieldValue": "={{ $('Build + Prepare qa-report.json').first().json.qa_score }}"
+            },
+            {
+              "fieldId": "s3_key_qa",
+              "fieldValue": "={{ $('Build + Prepare qa-report.json').first().json.s3_key_qa }}"
+            },
+            {
+              "fieldId": "qa_attempt",
+              "fieldValue": "={{ $('Build + Prepare qa-report.json').first().json.qa_attempt }}"
+            },
+            {
+              "fieldId": "max_qa_attempts",
+              "fieldValue": "={{ $('Build + Prepare qa-report.json').first().json.max_qa_attempts }}"
+            },
+            {
+              "fieldId": "updated_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "2b67f873-cdf0-4ec0-a535-e0b9fee4d30d",
+      "name": "Update State — QA Result (DynamoDB)",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -368,
+        -320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "20b2d91b-3ccd-4188-af46-8b056afa19c7",
+              "leftValue": "={{ $('Build + Prepare qa-report.json').first().json.qa_passed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a94937d1-ec1e-4f88-8f68-5697f3c6f3a7",
+      "name": "QA Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        -320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const i=$('Build + Prepare qa-report.json').first().json;\nreturn [{json:{\n  ...i,\n  final_status:'AWAITING_SIGN_OFF',\n  qa_attempts_used:i.qa_attempt,\n  approval_summary:[\n    `Campaign: ${i.campaign_name}`,\n    `Campaign ID: ${i.campaign_id}`,\n    `Subject: ${i.content?.subject || 'N/A'}`,\n    `QA Score: ${i.qa_score || 0}/100`,\n    `QA Attempts: ${i.qa_attempt}`,\n    'Status: Ready for human sign-off'\n  ].join('\\n')\n}}];"
+      },
+      "id": "901789e3-88f9-4a74-b67a-8eb225a63dae",
+      "name": "Package Final Artifacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -432
+      ]
+    },
+    {
+      "parameters": {
+        "topic": {
+          "__rl": true,
+          "value": "arn:aws:sns:ap-south-1:441243246681:loyalty-campaign-approval",
+          "mode": "list",
+          "cachedResultName": "loyalty-campaign-approval",
+          "cachedResultUrl": "https://ap-south-1.console.aws.amazon.com/sns/v3/home?region=ap-south-1#/topic/arn:aws:sns:ap-south-1:441243246681:loyalty-campaign-approval"
+        },
+        "subject": "=Campaign Ready for Sign-off — {{ $json.campaign_id }}",
+        "message": "=Campaign: {{ $json.campaign_name }}\nCampaign ID: {{ $json.campaign_id }}\nQA Score: {{ $json.qa_score }}/100\nQA Attempts: {{ $json.qa_attempts_used }}\nSubject: {{ $json.content && $json.content.subject ? $json.content.subject : 'N/A' }}\n\nPlan: s3://loyalty-campaign-artifacts/{{ $json.s3_key_plan }}\nContent: s3://loyalty-campaign-artifacts/{{ $json.s3_key_content }}\nQA: s3://loyalty-campaign-artifacts/{{ $json.s3_key_qa }}\n\nApprove: POST /webhook/campaign-signoff with {\"decision\":\"APPROVE\",\"approved_by\":\"name\"}\nReject: POST /webhook/campaign-signoff with {\"decision\":\"REJECT\",\"rejected_by\":\"name\",\"reason\":\"reason\"}"
+      },
+      "id": "b3725114-0f9b-4bf3-8cf8-769def4c5818",
+      "name": "Send Approval Request (SNS)",
+      "type": "n8n-nodes-base.awsSns",
+      "typeVersion": 1,
+      "position": [
+        208,
+        -432
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input=$('Build + Prepare qa-report.json').first().json;\nconst max=Number(input.max_qa_attempts||3);\nconst current=Number(input.qa_attempt||1);\nconst left=max-current;\nreturn [{json:{\n  ...input,\n  attempts_left:left,\n  max_attempts_reached:left<=0,\n  retry_message:left>0\n    ? `QA failed. Attempt ${current}/${max}. Retrying Content Agent with QA feedback.`\n    : `QA failed after ${max} attempts. Escalating for manual review.`\n}}];"
+      },
+      "id": "fa8ee81f-7326-420a-9552-74548a4f595a",
+      "name": "Check Attempt Limit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "293b1a0d-c11b-4b5a-b954-690e66087a57",
+              "leftValue": "={{ $json.max_attempts_reached }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f6bed9ab-51cd-4156-80a8-5e57003164b4",
+      "name": "Max Attempts Reached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        192,
+        -192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const i=$input.first().json;\nreturn [{json:{\n  ...i,\n  final_status:'ESCALATED',\n  reason:`QA failed after maximum ${i.max_qa_attempts || 3} attempts`,\n  qa_attempts_used:i.qa_attempt,\n  last_qa_score:i.qa_score,\n  last_qa_issues:i.qa_report?.issues || [],\n  escalated_at:new Date().toISOString(),\n  action_required:'Manual content review and QA sign-off required'\n}}];"
+      },
+      "id": "e4cb830e-7f85-465b-bb1c-9062424d0e97",
+      "name": "Escalate to Manual Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -160
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Planning Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Planning Agent": {
+      "main": [
+        [
+          {
+            "node": "Build + Prepare plan.json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build + Prepare plan.json": {
+      "main": [
+        [
+          {
+            "node": "Upload plan.json to S3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload plan.json to S3": {
+      "main": [
+        [
+          {
+            "node": "Update State — Plan Ready (DynamoDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State — Plan Ready (DynamoDB)": {
+      "main": [
+        [
+          {
+            "node": "Content Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Content Agent": {
+      "main": [
+        [
+          {
+            "node": "Build + Prepare content.json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build + Prepare content.json": {
+      "main": [
+        [
+          {
+            "node": "Upload content.json to S3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload content.json to S3": {
+      "main": [
+        [
+          {
+            "node": "Update State — Content Ready (DynamoDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State — Content Ready (DynamoDB)": {
+      "main": [
+        [
+          {
+            "node": "QA Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Agent": {
+      "main": [
+        [
+          {
+            "node": "Build + Prepare qa-report.json",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build + Prepare qa-report.json": {
+      "main": [
+        [
+          {
+            "node": "Upload qa-report.json to S3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload qa-report.json to S3": {
+      "main": [
+        [
+          {
+            "node": "Update State — QA Result (DynamoDB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update State — QA Result (DynamoDB)": {
+      "main": [
+        [
+          {
+            "node": "QA Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Passed?": {
+      "main": [
+        [
+          {
+            "node": "Package Final Artifacts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Attempt Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Package Final Artifacts": {
+      "main": [
+        [
+          {
+            "node": "Send Approval Request (SNS)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Attempt Limit": {
+      "main": [
+        [
+          {
+            "node": "Max Attempts Reached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Max Attempts Reached?": {
+      "main": [
+        [
+          {
+            "node": "Escalate to Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Content Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "7c1dcef7-2843-43ad-a0fd-934a6e8127b3",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "119b6b4011f3f1ef1158a2238d0c3bda203b1e347cb06b9fb8a13ba0f0dcc36f"
+  },
+  "nodeGroups": [],
+  "id": "QFDXy2Dx0EF1cjBL",
+  "tags": [
+    {
+      "updatedAt": "2026-10-18T16:56:17.744Z",
+      "createdAt": "2026-10-18T16:56:17.744Z",
+      "id": "TyY7ZRQShbnY08ck",
+      "name": "Loyalty Campaign"
+    },
+    {
+      "updatedAt": "2026-10-18T16:56:18.706Z",
+      "createdAt": "2026-10-18T16:56:18.706Z",
+      "id": "YxSguJLsDYxUsgdh",
+      "name": "AWS"
+    },
+    {
+      "updatedAt": "2026-10-18T16:56:18.312Z",
+      "createdAt": "2026-10-18T16:56:18.312Z",
+      "id": "bG3JmLhkSelaG0CT",
+      "name": "Multi-Agent"
+    },
+    {
+      "updatedAt": "2026-10-18T16:56:17.789Z",
+      "createdAt": "2026-10-18T16:56:17.789Z",
+      "id": "hFL5gyDnHd9HAX6a",
+      "name": "Module 4"
+    }
+  ]
+}

@@ -1,0 +1,694 @@
+{
+  "name": "AWS Loyalty Points Ops Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loyalty-pipeline-alert",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "6b04acaf-cd5c-4b8e-89f5-cc157404d52a",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -896,
+        144
+      ],
+      "webhookId": "cda1d22b-b431-4a18-afd2-eab916e7361b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const agentOutput = $input.first().json.output || '';\n\n// Detect if agent halted\nconst agentHalted = agentOutput.toLowerCase().includes('halt')\n  || agentOutput.toLowerCase().includes('cannot proceed')\n  || agentOutput.toLowerCase().includes('stopping');\n\n// Clean markdown symbols and extract sections\nconst lines = agentOutput.split('\\n');\n\nconst findSection = (keyword) => {\n  const idx = lines.findIndex(l =>\n    l.toLowerCase().includes(keyword.toLowerCase()));\n  return idx !== -1\n    ? lines.slice(idx, idx + 2).join(' ')\n        .replace(/[#*\\-]/g, '')\n        .trim()\n    : 'Not found';\n};\n\nconst rootCause   = findSection('root cause');\nconst fixAction   = findSection('deduct') \n                 || findSection('fix action')\n                 || findSection('specific fix');\nconst discrepancy = findSection('excess points')\n                 || findSection('discrepancy');\nconst checklist   = findSection('checklist');\n\n// Pull upstream context safely\nlet customer_id     = 'CUST-001';\nlet pipeline_run_id = 'RUN-001';\nlet issue_type      = 'DOUBLE_MULTIPLIER';\n\ntry {\n  const upstream  = $('Webhook').first().json.body;\n  customer_id     = upstream.customer_id     || customer_id;\n  pipeline_run_id = upstream.pipeline_run_id || pipeline_run_id;\n  issue_type      = upstream.issue_type      || issue_type;\n} catch(e) {\n  // upstream not available — use defaults above\n}\n\nreturn [\n  {\n    json: {\n      fix_proposal    : agentOutput,\n      root_cause      : rootCause,\n      fix_action      : fixAction,\n      discrepancy     : discrepancy,\n      checklist       : checklist,\n      agent_halted    : agentHalted,\n      customer_id     : customer_id,\n      pipeline_run_id : pipeline_run_id,\n      issue_type      : issue_type,\n      parsed_at       : new Date().toISOString()\n    }\n  }\n];"
+      },
+      "id": "77c1b2a4-887f-4be0-9277-1f8fa0c6083b",
+      "name": "Parse Agent Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "tableName": "pipeline_state",
+        "dataToSend": "autoMapInputData",
+        "additionalFields": {}
+      },
+      "id": "ad6bc8e2-ca14-4ebf-9d5e-969b178c6345",
+      "name": "Write Pipeline State",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        176,
+        160
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "tableName": "pipeline_state",
+        "keysUi": {
+          "keyValues": [
+            {
+              "key": "pipeline_run_id",
+              "value": "={{ $json.pipeline_run_id }}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "00e44b0d-64fc-4782-b3f1-33ed39ebc332",
+      "name": "Read Pipeline State",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        336,
+        160
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableName": "points_ledger",
+        "keyConditionExpression": "customer_id = :customer_id",
+        "eavUi": {
+          "eavValues": [
+            {
+              "attribute": ":customer_id",
+              "value": "={{ $json.body.customer_id }}"
+            }
+          ]
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "9bc1f799-8b06-4195-8fb2-23df2aa8024b",
+      "name": "Points Ledger",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -688,
+        144
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6f3c773b-4fbd-4e83-8dea-f5bb87a5792e",
+              "leftValue": "={{ $json.agent_halted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "bc8ddfd8-cdb3-43c7-85a1-4825dbabcb19",
+              "leftValue": "",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0531d1ed-1510-4a2f-994a-b90d0d5587bc",
+      "name": "Agent Halted ?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        496,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json; const message = [ '🔍 Loyalty Points Agent — Fix Proposal', '━━━━━━━━━━━━━━━━━━━━━━━━', `Customer ID : ${d.customer_id}`, `Pipeline Run : ${d.pipeline_run_id}`, `Issue Type : ${d.issue_type}`, '', 'Root Cause:', d.root_cause || 'See full report below', '', 'Proposed Fix:', d.fix_action || 'See full report below', '', 'Full Agent Report:', d.fix_proposal, '', 'Reply APPROVE or REJECT' ].join('\\n'); return [{ json: { ...d, formatted_message: message } }];"
+      },
+      "id": "c5d4e28f-f1f3-4efd-9432-82e41166827d",
+      "name": "Format Fix Proposal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "039ee1cc-e415-47e0-833f-afbea6a2fd76",
+              "leftValue": "={{ $json.body.decision }}",
+              "rightValue": "APPROVE",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0ef1d2cb-a11b-404c-b991-938055ca2da8",
+      "name": "Decision?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        976,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "options": {
+          "webhookSuffix": "approval"
+        }
+      },
+      "id": "abc9975f-fcf7-4fc8-8b75-505e46c35af4",
+      "name": "Wait for Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        816,
+        176
+      ],
+      "webhookId": "95dc3802-260e-4f22-9c2a-205eaddf0170"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Flagged Reason: <<{{ $json.flagged_reason }}>>\n\nCustomer ID      : {{ $json.customer_id }}\nPipeline Run     : {{ $(\"Webhook\").item.json.body.pipeline_run_id }}\nIssue Type       : {{ $(\"Webhook\").item.json.body.issue_type }}\nTotal Earned     : {{ $json.points_earned }}\nTotal Redeemed   : {{ $json.points_redeemed }}\nTransaction      : {{ $json.transaction_id }}\n\nApply the CRITICAL RULE to the Flagged Reason above first, before considering any other field.",
+        "options": {
+          "systemMessage": "=You are a Loyalty Points Pipeline Operations Agent.\n\nCRITICAL RULE (check this before anything else, including before reading other fields):\nFlagged Reason value is provided below between << >> markers.\nIf the content between the markers is empty, only whitespace, or exactly the two characters \"\" — treat it as NO REASON.\n\nIF NO REASON:\n- Do not call any tool.\n- Do not call query_points_ledger, validate_adjustment, or run_reconciliation.\n- Respond with exactly: \"No issues were found for the customer {{ $json.customer_id }} and no investigation is required.\"\n- Stop. Do not add anything else.\n\nIF A REAL REASON IS PRESENT (actual descriptive text, not just quote marks or blank):\n- Call tools in this exact order: query_points_ledger, then validate_adjustment, then run_reconciliation.\n- Do not skip or reorder.\n- Do not ask questions.\n- After all three return, report: Root cause, Exact excess points amount, Specific fix action (e.g. Deduct 500 points from {{ $json.customer_id }} for the transactions ), Checklist result."
+        }
+      },
+      "id": "f539f99b-89f5-42df-8a29-84036e1a5623",
+      "name": "Loyalty Ops Agent1",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -480,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "model": "apac.anthropic.claude-3-haiku-20240307-v1:0",
+        "options": {}
+      },
+      "id": "c9e5bef7-f57e-4156-b8e6-d69f9e0b3e6b",
+      "name": "AWS Bedrock Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1.2,
+      "position": [
+        -736,
+        368
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Call this query_points_ledger tool immediately as your FIRST action. ",
+        "function": "arn:aws:lambda:ap-south-1:441243246681:function:query_points_ledger",
+        "payload": "={{ JSON.stringify({ customer_id: $(\"Webhook\").item.json.body.customer_id, transactions: $(\"Points Ledger\").all().map(i => i.json) }) }}"
+      },
+      "id": "a0ec17d1-44b3-433a-83a7-72f260fff53b",
+      "name": "query_points_ledger Code Tool1",
+      "type": "n8n-nodes-base.awsLambdaTool",
+      "typeVersion": 1,
+      "position": [
+        -512,
+        368
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Call this validate_adjustment tool as your SECOND action after query_points_ledger. ",
+        "function": "arn:aws:lambda:ap-south-1:441243246681:function:validate_adjustment",
+        "payload": "={{ JSON.stringify({ customer_id: $(\"Webhook\").item.json.body.customer_id, issue_type: $(\"Webhook\").item.json.body.issue_type, transactions: $(\"Points Ledger\").all().map(i => i.json) }) }}"
+      },
+      "id": "69521332-fc6f-43c1-900c-9178d9ace033",
+      "name": "validate_adjustment Code Tool1",
+      "type": "n8n-nodes-base.awsLambdaTool",
+      "typeVersion": 1,
+      "position": [
+        -336,
+        368
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Call this run_reconciliation tool as your THIRD and FINAL action",
+        "function": "arn:aws:lambda:ap-south-1:441243246681:function:run_reconciliation",
+        "payload": "={{ JSON.stringify({ customer_id: $(\"Webhook\").item.json.body.customer_id, pipeline_run_id: $(\"Webhook\").item.json.body.pipeline_run_id, issue_type: $(\"Webhook\").item.json.body.issue_type, transactions: $(\"Points Ledger\").all().map(i => i.json) }) }}"
+      },
+      "id": "eeffcfa8-3e8c-4949-a712-ecd51226f363",
+      "name": "run_reconciliation Code Tool1",
+      "type": "n8n-nodes-base.awsLambdaTool",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        368
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6f3c773b-4fbd-4e83-8dea-f5bb87a5792e",
+              "leftValue": "={{ $json.output }}",
+              "rightValue": "=No issues were found for the customer",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "bc8ddfd8-cdb3-43c7-85a1-4825dbabcb19",
+              "leftValue": "",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1632393-41c2-4b11-9d64-9db577f16b4d",
+      "name": "Check Issue Correctness",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -192,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    status: \"NO_ISSUES\",\n    message: \"No issues found.\",\n    pipeline_run_id: $input.first().json.pipeline_run_id,\n    customer_id: $input.first().json.customer_id\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "99269e67-43ad-43cc-aa08-1f1311910f9f",
+      "name": "No Issues"
+    },
+    {
+      "parameters": {
+        "jsCode": "const workflowData = $getWorkflowStaticData('global'); const input = $input.first().json; const runId = input.pipeline_run_id; if (workflowData.pipeline_states?.[runId]) { workflowData.pipeline_states[runId].status = 'RESOLVED'; workflowData.pipeline_states[runId].resolved = true; workflowData.pipeline_states[runId].approved_by = input.body?.approved_by || 'engineer'; workflowData.pipeline_states[runId].resolved_at = new Date().toISOString(); } return [ { json: { status : 'RESOLVED', pipeline_run_id : runId, customer_id : input.customer_id, fix_action : input.fix_action, approved_by : input.body?.approved_by || 'engineer', resolved_at : new Date().toISOString() } } ];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        112
+      ],
+      "id": "3759d9b0-80e3-4840-acc0-1b0087080fff",
+      "name": "Mark Resolved"
+    },
+    {
+      "parameters": {
+        "jsCode": "const workflowData = $getWorkflowStaticData('global'); const input = $input.first().json; const runId = input.pipeline_run_id || 'RUN-001'; if (workflowData.pipeline_states?.[runId]) { workflowData.pipeline_states[runId].status = 'REJECTED'; workflowData.pipeline_states[runId].resolved = false; workflowData.pipeline_states[runId].rejected_at = new Date().toISOString(); } return [ { json: { status : 'REJECTED', pipeline_run_id : runId, customer_id : input.customer_id, rejected_at : new Date().toISOString() } } ];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        272
+      ],
+      "id": "3f5b048c-637e-4775-8c1d-0fb490bf781c",
+      "name": "Mark Rejected"
+    },
+    {
+      "parameters": {
+        "tableName": "points_ledger",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "customer_id",
+              "fieldValue": "={{ $('Points Ledger').item.json.customer_id }}"
+            },
+            {
+              "fieldId": "transaction_id",
+              "fieldValue": "={{ $('Points Ledger').item.json.transaction_id }}"
+            },
+            {
+              "fieldId": "created_at",
+              "fieldValue": "={{ $('Points Ledger').item.json.created_at }}"
+            },
+            {
+              "fieldId": "flagged_reason",
+              "fieldValue": "RESOLVED"
+            },
+            {
+              "fieldId": "multiplier_applied_count",
+              "fieldValue": "={{ $('Points Ledger').item.json.multiplier_applied_count }}"
+            },
+            {
+              "fieldId": "pipeline_name",
+              "fieldValue": "={{ $('Points Ledger').item.json.pipeline_name }}"
+            },
+            {
+              "fieldId": "points_earned",
+              "fieldValue": "0"
+            },
+            {
+              "fieldId": "points_redeemed",
+              "fieldValue": "0"
+            },
+            {
+              "fieldId": "promo_code",
+              "fieldValue": "={{ $('Points Ledger').item.json.promo_code }}"
+            },
+            {
+              "fieldId": "promo_multiplier",
+              "fieldValue": "={{ $('Points Ledger').item.json.promo_multiplier }}"
+            },
+            {
+              "fieldId": "status",
+              "fieldValue": "OK"
+            },
+            {
+              "fieldId": "tier",
+              "fieldValue": "={{ $('Points Ledger').item.json.tier }}"
+            },
+            {
+              "fieldId": "transaction_type",
+              "fieldValue": "={{ $('Points Ledger').item.json.transaction_type }}"
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "98847452-9627-4954-96ef-5967e00ca854",
+      "name": "Write Updated Datas to Points Ledger",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        160
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Points Ledger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Agent Response": {
+      "main": [
+        [
+          {
+            "node": "Write Pipeline State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Pipeline State": {
+      "main": [
+        [
+          {
+            "node": "Read Pipeline State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Pipeline State": {
+      "main": [
+        [
+          {
+            "node": "Agent Halted ?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Points Ledger": {
+      "main": [
+        [
+          {
+            "node": "Loyalty Ops Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Halted ?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Format Fix Proposal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Fix Proposal": {
+      "main": [
+        [
+          {
+            "node": "Wait for Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision?": {
+      "main": [
+        [
+          {
+            "node": "Mark Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Approval": {
+      "main": [
+        [
+          {
+            "node": "Decision?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AWS Bedrock Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Loyalty Ops Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "query_points_ledger Code Tool1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Loyalty Ops Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "validate_adjustment Code Tool1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Loyalty Ops Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "run_reconciliation Code Tool1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Loyalty Ops Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loyalty Ops Agent1": {
+      "main": [
+        [
+          {
+            "node": "Check Issue Correctness",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Issue Correctness": {
+      "main": [
+        [
+          {
+            "node": "No Issues",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Agent Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Resolved": {
+      "main": [
+        [
+          {
+            "node": "Write Updated Datas to Points Ledger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "7aa54bab-99e8-4e72-9d00-67c27ab12b16",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "119b6b4011f3f1ef1158a2238d0c3bda203b1e347cb06b9fb8a13ba0f0dcc36f"
+  },
+  "nodeGroups": [],
+  "id": "VGuv9Q7yF92MQVBc",
+  "tags": []
+}

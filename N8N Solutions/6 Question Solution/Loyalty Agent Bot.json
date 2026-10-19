@@ -1,0 +1,481 @@
+{
+  "name": "Loyalty Agent Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "bot",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "bb460924-019a-4c6c-a9f4-5eba6966ed76",
+      "name": "Bot",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1968,
+        112
+      ],
+      "webhookId": "eaca6e5a-90c6-442f-9f40-2803157c006a",
+      "notes": "Accepts { \"text\": \"lookup MBR-GOLD-001 member details and share the details in the Mail\" } or a Teams-shaped body — Extract Raw Message below handles both."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Pull the plain request text out of whatever shape the caller sent ────\nconst input = $input.first().json;\nconst body  = input.body || {};\n\nconst rawText = body.text || body.chatInput || (typeof body === 'string' ? body : JSON.stringify(body));\n\nreturn [{ json: { raw_text: rawText, received_at: new Date().toISOString() } }];"
+      },
+      "id": "c7058b05-d775-4c2b-8b0f-2545becf6732",
+      "name": "Extract Raw Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1760,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "model": "anthropic.claude-3-haiku-20240307-v1:0",
+        "options": {
+          "maxTokensToSample": 512,
+          "temperature": 0.1
+        }
+      },
+      "id": "1c866e31-9fbe-469e-946a-1e4f1608608e",
+      "name": "Claude 3 Haiku (Bedrock)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1,
+      "position": [
+        -1568,
+        320
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Shared by BOTH agents below — same model, one node, fanned out to two Agent nodes."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.raw_text }}",
+        "options": {
+          "systemMessage": "You extract two things from a loyalty-programme request: the member ID, and which channel the person wants the reply sent to. Respond with ONLY a JSON object, no other text, in exactly this shape: {\"member_id\": \"MBR-XXX-000\", \"delivery_channel\": \"email\"}. delivery_channel must be either \"email\" or \"telegram\" — treat any mention of \"mail\", \"email\", or \"gmail\" as \"email\", and any mention of \"telegram\" or \"chat\" as \"telegram\". If the channel isn't mentioned at all, default to \"email\". If no member ID is present, set member_id to an empty string."
+        }
+      },
+      "id": "980d88f0-4b6e-4bbd-b32b-a98281be913b",
+      "name": "Extract Intent Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -1568,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Safely parse Agent 1's JSON, with a regex fallback if it wasn't clean ─\nconst agentOut = $input.first().json;\nconst raw      = $('Extract Raw Message').first().json.raw_text;\nconst text     = agentOut.output || agentOut.text || '';\n\nlet memberId = '';\nlet channel  = 'email';\n\ntry {\n  const jsonMatch = text.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    const parsed = JSON.parse(jsonMatch[0]);\n    memberId = (parsed.member_id || '').toUpperCase();\n    channel  = (parsed.delivery_channel || 'email').toLowerCase();\n  }\n} catch (e) {\n  // fall through to regex fallback below\n}\n\n// Fallback net, in case the agent's output wasn't valid JSON\nif (!memberId) {\n  const m = raw.match(/MBR-[A-Z]+-\\d+/i);\n  if (m) memberId = m[0].toUpperCase();\n}\nif (channel !== 'email' && channel !== 'telegram') {\n  const lower = raw.toLowerCase();\n  channel = (lower.includes('telegram') || lower.includes('chat')) ? 'telegram' : 'email';\n}\n\nreturn [{ json: { member_id: memberId, delivery_channel: channel } }];"
+      },
+      "id": "d77d8219-c973-4c17-96d2-ffd3f6446326",
+      "name": "Parse Extracted Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1280,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableName": "points_ledger",
+        "keyConditionExpression": "customer_id = :cid",
+        "eavUi": {
+          "eavValues": [
+            {
+              "attribute": ":cid",
+              "value": "={{ $json.member_id }}"
+            }
+          ]
+        },
+        "returnAll": true,
+        "options": {}
+      },
+      "id": "82676ec2-a5d1-4630-afde-cf63ca28e00d",
+      "name": "Query Member — DynamoDB",
+      "type": "n8n-nodes-base.awsDynamoDb",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        112
+      ],
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      },
+      "notes": "Same table/keys as your existing setup — points_ledger by customer_id."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Turn raw DynamoDB rows into a clean, plain member profile ───────────\nconst rows   = $input.all().map(i => i.json);\nconst intent = $('Parse Extracted Intent').first().json;\n\nconst readField = (obj, name) => {\n  const v = obj[name];\n  if (v && typeof v === 'object') return v.S ?? v.N ?? '';\n  return v;\n};\nconst readNum = (obj, name) => parseFloat(readField(obj, name)) || 0;\n\nlet member;\nif (rows.length === 0) {\n  member = { member_id: intent.member_id, found: false };\n} else {\n  const profile = rows.find(r => readField(r, 'transaction_id') === 'PROFILE') || rows[rows.length - 1];\n  member = {\n    member_id      : intent.member_id,\n    tier           : readField(profile, 'tier') || 'Unknown',\n    points_balance : readNum(profile, 'points_balance'),\n    points_earned  : readNum(profile, 'points_earned'),\n    points_redeemed: readNum(profile, 'points_redeemed'),\n    status         : readField(profile, 'status') || 'Unknown',\n    member_since   : readField(profile, 'member_since') || 'Unknown',\n    tier_expiry    : readField(profile, 'tier_expiry') || 'Unknown',\n    found          : true\n  };\n}\n\nreturn [{ json: { member, delivery_channel: intent.delivery_channel } }];"
+      },
+      "id": "804af01f-470b-4afb-9fe8-1000f1c7a9e6",
+      "name": "Flatten Member Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Member data: {{ JSON.stringify($json.member) }}\nDelivery channel: {{ $json.delivery_channel }}",
+        "options": {
+          "systemMessage": "You write short, friendly loyalty-programme status summaries for a member lookup. If found is false, just say the member ID wasn't found and to double-check it. Otherwise include tier, points balance, points earned, points redeemed, status, member since, and tier expiry. If delivery_channel is \"email\", write 2-4 short sentences plus the key facts clearly labeled, suitable for an email body. If delivery_channel is \"telegram\", write a much shorter, single-message version with just the headline facts. Output plain text only — no markdown, no JSON."
+        }
+      },
+      "id": "cc1545c6-944d-4721-94a3-3d9015d435f1",
+      "name": "Format Report Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -688,
+        112
+      ],
+      "notes": "Uses the SAME Claude 3 Haiku Bedrock model node as the extraction agent."
+    },
+    {
+      "parameters": {
+        "jsCode": "const formatted = $input.first().json;\nconst flat = $('Flatten Member Data').first().json;\n\nconst messageText = formatted.output || formatted.text || '';\n\nreturn [{\n  json: {\n    formatted_message: messageText,\n    subject          : 'Loyalty Status — ' + (flat.member.member_id || 'Unknown Member'),\n    delivery_channel : flat.delivery_channel\n  }\n}];"
+      },
+      "id": "ea75234b-d98c-4d27-988c-e93753170299",
+      "name": "Prepare MCP Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -416,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.delivery_channel }}",
+              "rightValue": "email",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dc994237-4cbb-4561-9f3b-f4096c334304",
+      "name": "Email or Telegram?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "endpointUrl": "=http://localhost:5678/mcp/tool",
+        "authentication": "headerAuth",
+        "tool": {
+          "__rl": true,
+          "value": "Send_a_message_in_Gmail",
+          "mode": "list",
+          "cachedResultName": "Send_a_message_in_Gmail"
+        },
+        "inputMode": "json",
+        "jsonInput": "={{ JSON.stringify({ formatted_message: $json.formatted_message, subject: $json.subject }) }}",
+        "options": {}
+      },
+      "id": "e23844a1-2f0a-4e20-ac67-19a920d04b90",
+      "name": "Send via Gmail (MCP)",
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s0xFhujJiNlplDYM",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "FIX: production /mcp/ path (was /mcp-test/). Also update the Gmail2 tool node in your MCP Trigger workflow to use {{$json.formatted_message}} for its message body instead of a raw JSON dump — see companion note."
+    },
+    {
+      "parameters": {
+        "endpointUrl": "=http://localhost:5678/mcp/tool",
+        "authentication": "headerAuth",
+        "tool": {
+          "__rl": true,
+          "value": "Send_a_text_message_in_Telegram",
+          "mode": "list",
+          "cachedResultName": "Send_a_text_message_in_Telegram"
+        },
+        "inputMode": "json",
+        "jsonInput": "={{ JSON.stringify({ formatted_message: $json.formatted_message }) }}",
+        "options": {}
+      },
+      "id": "d3570068-b7b2-4b0d-9dda-00775d08b7df",
+      "name": "Send via Telegram (MCP)",
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        208
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s0xFhujJiNlplDYM",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"ok\"}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "675ea8d5-67d0-4e39-956f-e02c6199574d",
+      "name": "Acknowledge (200 OK)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "model": "anthropic.claude-3-haiku-20240307-v1:0",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1.2,
+      "position": [
+        -672,
+        336
+      ],
+      "id": "708841c7-52d4-4068-881d-1e21a4cf56b7",
+      "name": "AWS Bedrock Chat Model",
+      "credentials": {
+        "aws": {
+          "id": "zkAl1ywNgXwRMaYH",
+          "name": "AWS (IAM) account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Bot": {
+      "main": [
+        [
+          {
+            "node": "Extract Raw Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Raw Message": {
+      "main": [
+        [
+          {
+            "node": "Extract Intent Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude 3 Haiku (Bedrock)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Intent Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Intent Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Extracted Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Extracted Intent": {
+      "main": [
+        [
+          {
+            "node": "Query Member — DynamoDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Member — DynamoDB": {
+      "main": [
+        [
+          {
+            "node": "Flatten Member Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Member Data": {
+      "main": [
+        [
+          {
+            "node": "Format Report Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report Agent": {
+      "main": [
+        [
+          {
+            "node": "Prepare MCP Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare MCP Payload": {
+      "main": [
+        [
+          {
+            "node": "Email or Telegram?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email or Telegram?": {
+      "main": [
+        [
+          {
+            "node": "Send via Gmail (MCP)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send via Telegram (MCP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send via Gmail (MCP)": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge (200 OK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send via Telegram (MCP)": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge (200 OK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AWS Bedrock Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Format Report Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "c2d13687-b2f1-4eab-94af-b9cb6a09ab8b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "119b6b4011f3f1ef1158a2238d0c3bda203b1e347cb06b9fb8a13ba0f0dcc36f"
+  },
+  "nodeGroups": [],
+  "id": "Vj72oA65rCC04WbS",
+  "tags": [
+    {
+      "updatedAt": "2026-10-19T02:01:26.350Z",
+      "createdAt": "2026-10-19T02:01:26.350Z",
+      "id": "CWbS69MZsg1aTn3l",
+      "name": "Module 6"
+    },
+    {
+      "updatedAt": "2026-10-19T02:18:52.621Z",
+      "createdAt": "2026-10-19T02:18:52.621Z",
+      "id": "sq7mwr7e5C8aTiXM",
+      "name": "Bedrock"
+    },
+    {
+      "updatedAt": "2026-10-19T02:01:26.584Z",
+      "createdAt": "2026-10-19T02:01:26.584Z",
+      "id": "x23ZMoQ8sV6jkloP",
+      "name": "MCP Client"
+    }
+  ]
+}

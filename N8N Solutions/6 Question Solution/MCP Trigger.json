@@ -1,0 +1,132 @@
+{
+  "name": "MCP Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Send a message in Gmail",
+        "sendTo": "springboardmentor413@gmail.com",
+        "subject": "={{ $fromAI(\"subject\") }}",
+        "emailType": "text",
+        "message": "={{ $fromAI(\"formatted_message\") }}",
+        "options": {}
+      },
+      "id": "72cb9e98-920f-4300-a30c-776aa2af8733",
+      "name": "Send a message in Gmail",
+      "type": "n8n-nodes-base.gmailTool",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        176
+      ],
+      "webhookId": "865ea1fd-a6f9-4a4d-a222-650ca15c66c4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "KkYAK8Lkem21AG5d",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "1072906417",
+        "text": "={{ $fromAI(\"formatted_message\") }}",
+        "additionalFields": {}
+      },
+      "id": "1a43b41a-032f-45ae-a1af-22a9154abbe2",
+      "name": "Send a text message in Telegram",
+      "type": "n8n-nodes-base.telegramTool",
+      "typeVersion": 1.2,
+      "position": [
+        80,
+        192
+      ],
+      "webhookId": "38bcaa4e-47fb-4513-9c7a-dbe4d37bf8f0",
+      "credentials": {
+        "telegramApi": {
+          "id": "Me0y0SiECG19gQMh",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "path": "tool"
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2,
+      "position": [
+        16,
+        -48
+      ],
+      "id": "979ca0ed-2dc4-4bc4-aae7-9b7a1fa0196e",
+      "name": "MCP Server Trigger",
+      "webhookId": "3d6e767a-6f33-4dc5-8225-e618cbaaeb32",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "s0xFhujJiNlplDYM",
+          "name": "Header Auth account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Send a text message in Telegram": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message in Gmail": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "1b1f7e75-5a96-4b6f-bb55-552b0ae92d00",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "119b6b4011f3f1ef1158a2238d0c3bda203b1e347cb06b9fb8a13ba0f0dcc36f"
+  },
+  "nodeGroups": [],
+  "id": "l1AUsSKczKgAwhB1",
+  "tags": [
+    {
+      "updatedAt": "2026-10-19T02:01:26.350Z",
+      "createdAt": "2026-10-19T02:01:26.350Z",
+      "id": "CWbS69MZsg1aTn3l",
+      "name": "Module 6"
+    },
+    {
+      "updatedAt": "2026-10-19T02:01:26.593Z",
+      "createdAt": "2026-10-19T02:01:26.593Z",
+      "id": "NzdFmwylU5A1FbJx",
+      "name": "A2A"
+    },
+    {
+      "updatedAt": "2026-10-19T02:01:26.584Z",
+      "createdAt": "2026-10-19T02:01:26.584Z",
+      "id": "x23ZMoQ8sV6jkloP",
+      "name": "MCP Client"
+    }
+  ]
+}
